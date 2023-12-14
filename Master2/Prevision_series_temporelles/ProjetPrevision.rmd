@@ -1,0 +1,960 @@
+---
+title: "Statistique et apprentissage pour la prévision de séries temporelles"
+subtitle: Prévision des locations de vélibs à Londres
+author: "Diaby Drame & Cynthia Lepere"
+date: "Janvier 2023"
+lang: "fr"
+output:
+  html_document:
+    toc: yes
+always_allow_html: true 
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE)
+knitr::opts_chunk$set(fig.align="center", fig.pos="H",fig.width=10, fig.height=4)
+
+library(ggplot2)
+library(plotly)       # graph interactif
+library(tidyr)
+library(dplyr)
+library(magrittr)     # pour utiliser l'opérateur pipe %>%
+library(kableExtra)   # pour améliorer les tableaux
+library(grid)         # textGrob
+library(gridExtra)    # grid.arrange
+library(lubridate)
+library(naniar)       # pour les données manquantes
+
+library(stats)
+library(tseries)
+library(forecast)
+library(TSstudio)
+library(corrr)
+library(corrplot)
+library(tictoc)       # chrono
+
+library(rpart.plot)   # arbre de decision
+library(Metrics)
+library(mgcv)         # GAM
+library(ranger)       # install.packages("caret", dependencies = TRUE)
+library(xgboost)
+library(prophet)
+library(opera)
+library(keras)
+```
+
+# Introduction
+
+Nous sommes deux étudiants habitués aux métros parisiens, surchargés tout autant que le trafic routier, comme dans d'autres grandes villes. Nous pouvons donc affimer que se déplacer en vélo présente beaucoup d'avantages...mais malheureusement, un inconvénient existe : parfois il n'y a plus de vélos disponibles dans une station désirée, ou alors plus de places pour les rendre.
+
+Nous avons lu un [article](https://blog.velib-metropole.fr/2014/11/28/prevoir-a-12h-la-disponibilite-des-velos/) d'un enseignant chercheur en mécanique des fluides qui a créé justement un logiciel de prédiction, intégré dans l’application «La Bonne Station» de Keolis, destinée aux utilisateurs du VCub a Bordeaux (équivalent des velibs a Paris) et nous avons trouvé intéressant cet enjeux de prévision.
+Son objectif est de maximiser l’efficacité des opérations de régulation des vélos: Quelles stations approvisionner en priorité ? Quelles stations agrandir en priorité ? Où positionner de nouvelles stations ? Quelles stratégies adopter pour être le plus efficace possible ?  
+
+# Présentation des données
+
+Pour notre projet d’analyse prédictive reliée au vélibs, nous allons travailler sur le jeu de données **London bike**.  
+Nous l'avons trouvé sur le site [Kaggle](https://www.kaggle.com/datasets/hmavrodiev/london-bike-sharing-dataset).
+Il correspond a des données de locations de vélos dans la ville de Londres.
+
+```{r data}
+data <- read.csv("london_merged.csv")  %>%
+  mutate(timestamp = as.POSIXct(timestamp))
+
+colnames(data)= c("timestamp", "cnt","t1", "t2", "hum", "wind", "weather", "holiday", "weekend", "season")
+
+kable(data[1:5,], caption="Appercu du jeu de données", booktabs=T) %>%
+  kable_styling(latex_options=c("striped", "hold_position"))
+```
+
+Il contient $17414$ observations, recensées sur deux ans, pendant chaque heure entre le 04/01/2015 à 00h00 et le 03/01/2017 à 23h00, et $10$ variables :
+
+* **timestamp** = l'horodatage
+* **cnt** = le nombre de vélos empruntés
+* **t1** = la température réelle (en C°)
+* **t2** = la température ressentie (en C°)
+* **hum** = l'humidité (en %)
+* **wind** = la vitesse du vent (en km/h)
+* **weather** = la météo (1=clair,2=peu nuageux,3=nuages fragmentés,4=nuageux/couvert...,7=pluie)
+* **holiday** = jour de vacances(1) ou non vacances(0)
+* **weekend** = jour de week-end(1) ou non week-end(0)
+* **season** = la saison (0-printemps ; 1-été; 2-automne; 3-hiver)
+
+$\underline{Problématique}$  
+Nous commencerons par chercher a prédire le nombre d’emprunts de vélos des 4 derniers mois du jeu de données, avec des modèles qui utilisent juste les variables explicatives.  
+Puis nous ferons un modele prédictif, afin de prevoir les futurs emprunts de vélos.
+
+Notre variable d’intérêt sera donc le nombre de vélos empruntés «cnt».  
+Et nos variables explicatives seront les autres.  
+
+$\underline{Traitement~des~données}$  
+Nous commençons par verifier que nous n'avons pas de données manquantes:
+
+```{r missingvalue, message=F, warning=F}
+vis_miss(data)
+```
+
+C'est bien le cas, donc nous n'avons pas besoin de faire d'imputation de celles-ci!
+
+Ensuite, nous ajoutons plusieurs variables qui nous seront utiles pour la suite:
+
+* **day_of_month** =  le jour du mois
+* **month** = le mois (1=janvier...12=decembre)
+* **day_of_week** = le jour de la semaine (1=Dimanche...7=Lundi)
+* **hour** = l'heure
+* **Posy** = la position au cours de l'année
+* **date** = la date sous la forme année-mois-jour
+* **Year** = l'année
+
+```{r lubridate}
+data <- data %>%
+  dplyr::mutate(
+    day_of_month   = lubridate::day(timestamp),
+    month          = lubridate::month(timestamp),
+    day_of_week    = lubridate::wday(timestamp),
+    hour           = lubridate::hour(timestamp),    # <=> Instant
+    Posy           = (lubridate::yday(timestamp)-1)/(364+lubridate::leap_year(timestamp)*1),
+    date           = lubridate::date(timestamp),
+    Year           = lubridate::year(timestamp),
+               )
+
+data[1:5,] %>%
+  kable(caption="Appercu du nouveau jeu de données", booktabs=T) %>%
+  kable_styling(latex_options=c("striped", "hold_position"))
+
+#data[22:35,]
+```
+
+
+# Analyse descriptive
+
+Voici le nombre de vélos empruntés au cours du temps:
+
+```{r showdata}
+plot_data <-data %>%
+  ggplot(aes(x = timestamp, y = cnt)) +
+  geom_line(colour="navy") +
+  ggtitle("Nombre total de vélos loués") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_data)
+```
+
+Nos données ne recouvrent que deux ans, mais nous pouvons voir notamment une *saisonnalité*.  
+Nous n'avons pas de changement signification d'une année à l'autre dans la locations des vélos.  
+On remarque a priori qu'ils sont plus utilisés pendant l'été que l'hiver.  
+Nous voyons deux valeurs anormales / deux pics élévés durant l'été 2015. Les deux pics correspondent à des jours de grève des transports.  
+
+Regardons tout d'abord le nombre de vélos loués en fonction des différentes variables.
+
+$\underline{Variables~calendaires}$
+
+$\bullet~Graphiques~annuel$
+
+```{r plot_annuel}
+plot_annuel <- data %>% 
+   group_by(month, Year) %>% 
+   summarise(cnt = mean(cnt), .groups = 'drop') %>% 
+   ggplot(aes(x = month, y = cnt, color = Year, group = Year)) + geom_line() +
+   scale_x_continuous(breaks = c(1:12)) +
+   ggtitle("Nombre de vélos loués au cours de chaque mois, pour chaque année") + theme(plot.title=element_text(hjust=0.5)) +
+   xlab("mois") + ylab("Nombre de vélo loué")
+ggplotly(plot_annuel)
+
+plot_annuel2 <- data %>%
+  group_by(month) %>%
+  summarise(cnt = mean(cnt)) %>%
+  ggplot(aes(x=month, y=cnt)) + geom_line(color="navy") +
+  scale_x_continuous(breaks = c(1:12)) +
+  ggtitle("Nombre de vélos loués au cours de chaque mois, moyenne des deux années") +
+  theme(plot.title=element_text(hjust=0.5)) +
+  xlab("mois") + ylab("Nombre de vélo loué")
+ggplotly(plot_annuel2)
+```
+
+- Sur le premier graphique, nous voyons le nombre de locations de vélos à chaque mois tout au long de l'année.
+La courbe noire correspond a la premiere année de notre jeu de données (2015/2016), et celle en bleue a la deuxieme année (2016/2017).  
+Nous voyons un pic élévé au milieu des deux années (7eme mois: juillet) ce qui correspond aux étés.
+Tandis que les niveaux les plus bas sont en hiver (1er mois: janvier) et sont inférieur à ceux des autres saisons.  
+Cela nous confirme donc que les vélos sont moins empruntés pendant l'hiver.
+
+- Sur le deuxieme graphique, nous avons la moyenne des deux années, et elle nous indique les même conclusions.
+
+$\bullet~Graphiques~hebdomadaire$  
+
+```{r plot_hebdo}
+plot_hebdo <- data %>%
+  group_by(day_of_week) %>%
+  summarise(cnt = mean(cnt)) %>%
+  ggplot(aes(x=day_of_week, y=cnt)) +
+  geom_line(color="navy") +
+  scale_x_continuous(breaks = c(1:7)) +
+  ggtitle("Nombre de vélos loués au cours de la semaine") + theme(plot.title=element_text(hjust=0.5)) +
+  xlab("jour") + ylab("Nombre de vélo loué")
+ggplotly(plot_hebdo)
+
+plot_hebdo2 <- data %>%
+  select(timestamp, cnt) %>%
+  mutate(timestamp = date(timestamp)) %>%
+  group_by(timestamp) %>%
+  summarise(total = sum(cnt)) %>%
+  mutate(weekday = wday(timestamp, label = T)) %>%
+  group_by(weekday) %>%
+  summarise(total = sum(total)) %>%
+  ggplot(aes(x = weekday, y = total)) + 
+  geom_col(fill="navy") +
+  ggtitle("Histogramme") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_hebdo2)
+```
+
+- Le premier graphique représente le nombre de locations de vélos par jour(1=Dimanche...7=Lundi) en 1 semaine.  
+Nous remarquons que les vélos sont plus loués pendant la semaine que pendant le week-end.
+
+- Nous avons également représenté ces resultats sous la forme d'un diagramme à barres.
+
+$\bullet~Graphiques~quotidien$  
+
+```{r plot_quoti}
+plot_quoti <-data %>% 
+   group_by(holiday, hour) %>% 
+   summarise(cnt = mean(cnt), .groups = 'drop') %>% 
+   #filter(holiday == 0) %>%
+   ggplot(aes(x = hour, y = cnt, color = holiday, group = holiday)) + geom_line() +
+   xlab("heure") + ylab("Nombre de vélo loué") +
+   scale_x_continuous(breaks = c(0:23)) +
+   ggtitle("Nombre de vélos loués au cours de chaque heure, par rapport aux vacances") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_quoti)
+
+plot_quoti2 <-data %>% 
+   group_by(day_of_week, hour) %>% 
+   summarise(cnt = mean(cnt), .groups = 'drop') %>% 
+   ggplot(aes(x = hour, y = cnt, color = day_of_week, group = day_of_week)) + geom_line() +
+   xlab("heure") + ylab("Nombre de vélo loué") +
+   scale_x_continuous(breaks = c(0:23)) +   
+   ggtitle("Nombre de vélos loués au cours de chaque heure, par rapport au jour") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_quoti2)
+```
+
+- Le premier graphique montre le nombre de locations de vélos par heure pendant 1 jour.  
+La courbe bleue correspond aux jours de vacance, et celle en noire aux autres jour.  
+Le deuxieme graphique nous montre le nombre de locations de vélos par heure, pour chaque jours de la semaine.
+
+- Nous voyons clairement (et heureusement!!) que les locations pendant les non vacances, correspondent aux locations durant les jours de semaines. Et que les locations pendant les vacances, sont similaires a celles des jours de week end.
+
+- Par rapport aux vacances : nous remarquons qu'ils sont plus loués aux alentours de 14heures.  
+Alors que le reste de l'année : ils sont plus loués aux moment des heures de pointe (8 et 18 heures)   
+Et de même par rapport aux jours : En semaine, le nombre total de locations est faible de 00h00 à 05h00 et augmente jusqu'au premier pic à 08h00, puis les déplacements se stabilisent et restent à peu près constants jusqu'à 15h00.  
+Le deuxième pic est atteint à 17h00 et continue ensuite à baisser jusqu'à environ 500 à 23h00.  
+Cela suggère potentiellement que les cyclistes utilisent les vélos publics pour se rendre au travail vers 08h00 puis en revenir vers 17h00 en semaine.  
+Le week-end, les locations commencent à augmenter lorsque le soleil se lève, et diminuent le soir. 
+
+$\underline{Variables~liées~a~la~météo}$  
+
+```{r plot_meteo}
+t1Cnt   <- (data %>% group_by(t1))%>%summarise(cnt = mean(cnt))
+plot_t1 <- ggplot(t1Cnt) + aes(x=t1, y=cnt) + geom_line(color="navy") +
+           xlab("Temperature réelle") + ylab("Nombre de vélo loué")
+
+t2Cnt   <- (data %>% group_by(t2))%>%summarise(cnt = mean(cnt))
+plot_t2 <- ggplot(t2Cnt) + aes(x=t2, y=cnt) + geom_line(color="navy") +
+           xlab("Temperature ressentie") + ylab("Nombre de vélo loué")
+
+humCnt   <- (data %>% group_by(hum))%>%summarise(cnt = mean(cnt))
+plot_hum <- ggplot(humCnt) + aes(x=hum, y=cnt) + geom_line(color="navy") +
+            xlab("Humidité") + ylab("Nombre de vélo loué")
+
+windCnt   <- (data %>% group_by(wind))%>%summarise(cnt = mean(cnt))
+plot_wind <- ggplot(windCnt) + aes(x=wind, y=cnt) + geom_line(color="navy") +
+             xlab("Vitesse du vent") + ylab("Nombre de vélo loué")
+
+grid.arrange(plot_t1, plot_t2, plot_hum, plot_wind, nrow = 2, ncol = 2,
+             top=textGrob("Nombre de vélos loués par rapport aux variables liées a la météo",
+                          gp=gpar(face="bold", hjust=0.5)))
+```
+Nous remarquons que les vélos sont le plus loués lorsqu'il fait plus chaud, et qu'il y a moins d'humidité.  
+La vitesse du vent n'a pas vraiment l'air d'influer sur les locations par contre.
+
+```{r EN PLUS, warning=FALSE, include=FALSE}
+
+data %>% dplyr::filter(hour == 20) %>% ggplot(aes(x = t1, y = cnt)) + geom_point() + 
+  stat_smooth(method = "loess", formula = y ~ x, size = 1) +
+  ggtitle("Nombre de vélos loués en fonction de la température réelle a 20h") + theme(plot.title=element_text(hjust=0.5))
+
+data %>% ggplot(aes(x = t1, y = cnt)) + geom_point(alpha=.05) + 
+  stat_smooth(method = "loess", formula = y ~ x, size = 1) +
+  ggtitle("Nombre de vélos loués en fonction de la température réelle") + theme(plot.title=element_text(hjust=0.5))
+
+data %>% ggplot(aes(x = t2, y = cnt)) + geom_point(alpha=.05) + 
+  stat_smooth(method = "loess", formula = y ~ x, size = 1) +
+  ggtitle("Nombre de vélos loués en fonction de la température réelle") + theme(plot.title=element_text(hjust=0.5))
+
+data %>% ggplot(aes(x = hum, y = cnt)) + geom_point(alpha=.05) + 
+  stat_smooth(method = "loess", formula = y ~ x, size = 1) +
+  ggtitle("Nombre de vélos loués en fonction de la température réelle") + theme(plot.title=element_text(hjust=0.5))
+
+data %>% ggplot(aes(x = wind, y = cnt)) + geom_point(alpha=.05) + 
+  stat_smooth(method = "loess", formula = y ~ x, size = 1) +
+  ggtitle("Nombre de vélos loués en fonction de la température réelle") + theme(plot.title=element_text(hjust=0.5))
+
+#L'humidité semble être le meilleur prédicteur de la température donnée
+ggplot(data,aes(y=t1,x=t2,color=hum)) + geom_point() + geom_abline(intercept = 0,slope=1,linetype="dashed")
+```
+
+$\underline{Corrélations}$  
+
+```{r corr, message=F}
+corr_data <- cor(data[,-c(1,16)])
+  corrplot(corr_data,type="upper", order="original")
+
+data %>%
+  select(-c(timestamp)) %>%
+  correlate() %>%
+  network_plot(min_cor = 0)
+
+#head(corr_data)
+```
+
+- Sur la matrice de corrélation, nous remarquons que notre variable d'interet *cnt* est le plus corrélée avec les variables *t1*, *t2*, *hum* et *hour*.  
+
+- Sur le deuxieme "graphique" la proximité des points est déterminée à l'aide du clustering multidimensionnel.  
+Les variables temperature réelle *t1* et temperature ressentie *t2* apparaissent plus proche et sont jointes par un chemin plus foncé, elles sont donc les plus fortement corrélées. Nous utiliserons donc par la suite uniquement l'une des deux.  
+Les variables *day_of_month*, *day_of_week*, *holiday* et *weekend* forment comme un petit groupe, elles "donnent les mêmes explications".
+Les autres variables explicatives ne sont pas tellement corrélées entre elles.
+
+
+$\underline{Autocorrélations}$
+
+```{r autocorr, message=F, warning=F}
+t <- seq(1, nrow(data))
+reg.lin <- lm(cnt ~ t, data = data)
+eps <- data$cnt - predict(reg.lin, newdata = data)
+
+#densite
+data %>%
+  ggplot(aes(x=eps)) + 
+  geom_density(colour="navy", fill="navy") +
+  ggtitle("Graphe de densité") + theme(plot.title=element_text(hjust=0.5)) +
+  geom_vline(aes(xintercept=median(eps)), color="red", linetype="dashed", size=1)
+
+#autocorr
+ts_cor(ts(eps), seasonal = TRUE, 
+       lag.max = 30, 
+       seasonal_lags = 7)
+
+#autres plots de la densité
+#plot(density(data$cnt), main="Density Plot: New Bike Share", ylab="Frequency", sub=paste("Skewness:", round(e1071::skewness(data$cnt), 2)))
+#polygon(density(data$cnt), col="navy")
+#plot(density(x = eps))
+```
+
+- L'autocorrélation (ACF) d'une série fait référence au fait que dans une série temporelle, la mesure d'un phénomène à un instant t peut être corrélée aux mesures précédentes (au temps t-1, t-2, t-3, etc) ou aux mesures suivantes (à t+1, t+2, t+3, ...). L'autocorrélation mesure essentiellement la similitude entre les observations en fonction du décalage horaire entre elles. Une série autocorrélée est ainsi corrélée à elle-même, avec un décalage (lag) donné.  
+Sur notre graphique ACF, l'autocorrélation est la plus forte pour les décalages 1 et 24.
+(Et 0 mais ça ne signifie rien car l'autocorrélation de la série avec elle-même, sans décalage, est forcément de 1!)
+
+- L'autocorrélation (PACF) partielle permet de mesurer l'autocorrélation d'un signal pour un décalage k "indépendamment" des autocorrélations pour les décalages inférieurs.  
+Sur notre graphique ACF, on a une forte autocorrélation pour un décalage de 1, et de 24...
+Or l'autocorrélation pour le décalage de 24 pourrait très bien être une conséquence de celle existant pour le décalage de 1, c'est ce pourquoi nous regardons ensuite le graphique PACF.
+La valeur au lag 1 est bien plus forte que pour les autres, ce qui nous laisse penser que l'autocorrélation observée au décalage 24 était un effet résiduel de l'autocorrélation pour un décalage de 1.
+
+Si la série était stationnaire, nous verrions pratiquement toutes les lignes dans les intervalles de confiance a 95% représentés en verts. Or, nous voyons que chaque pic est hors de ces lignes.
+
+
+# Modélisation
+
+## Predictions de la fin du jeu de données
+
+Notre objectif est de développer des modèles basés sur l'ensemble de données d'entraînement et de faire des prédictions du nombre horaire de location de vélos à l'aide de l'ensemble de données de test.  
+Nous allons donc estimer des modèles sur des données d'entrainement et faire des prévisions sur des données de test.  
+Nous commençons par divisé notre jeu de données en une partie pour entrainer nos modèles, et une partie pour les valider.   
+Nous gardons les 4 derniers mois pour nos validations.
+
+```{r train/test}
+#2015-01-04 00:00:00 -> 2016-09-03 23:00:00 -> 2017-01-03 23:00:00
+data_train <- data %>% filter(timestamp < ymd("2016-09-04"))
+data_test  <- data %>% filter(timestamp >= ymd("2016-09-04"))
+
+#tail(data_train)
+#head(data_test)
+#dim(data_train)
+#dim(data_test)
+#mean(data_train$cnt) 1148.035
+#mean(data_test$cnt) 1118.673
+
+plot_split <- ggplot() + 
+  geom_line(data=data_train, aes(x = timestamp, y = cnt, colour="train")) + 
+  geom_line(data=data_test, aes(x = timestamp, y = cnt, colour="test")) +
+  scale_color_brewer(palette = "Accent", name = "Series") + 
+  ggtitle("Séparation train / test") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_split)
+```
+
+Nous avons 14488 observations pour nos tests, et 2926 pour nos validations.
+
+Nous allons appliqué plusieurs modèles afin de prédire le nombre total de locations de vélos par heure, pour les quatres dernier mois.  
+Nous les évaluerons grâce a differentes valeurs :
+
+* La racine de l’erreur quadratique moyenne (RMSE) définie par:
+$RMSE = \sqrt{MSE} = \sqrt{\frac{1}{n} \sum_{i=1}^n (y_i–\hat{y}_i)^2}$  
+Elle s’exprime dans la même unité que la variable à prédire.  
+Plus elle est élevée, moins le modèle est performant.  
+* L'erreur absolue moyenne en pourcentage (MAPE) définie par:
+$MAPE$ = $\frac{1}{n} \sum_{i=1}^n \displaystyle\left\lvert \frac{e_i}{y_i} \right\rvert$ =
+$\frac{1}{n} \sum_{i=1}^n \displaystyle\left\lvert \frac{ (y_i–\hat{y}_i) }{ y_i } \right\rvert$  
+Elle s’exprime en pourcentage et elle peut se traduire par le pourcentage moyen d’écart entre la valeur prédite et la réalité.  
+De même, plus elle est élevée, moins le modèle est performant.  
+* Le temps d'exécution
+
+Remarque:  
+- Nous avons choisi d'utiliser la MAPE et non la MAE (erreur absolue moyenne), pour deux raisons:  
+La première est qu'un pourcentage est plus facile à comprendre, et la seconde est que les scores MAPE peuvent être comparés entre différents modèles. Cependant, si vos valeurs réelles auraient été proches de 0, nous aurions choisis la MAE!!  
+- La MSLE (erreur logarithmique quadratique moyenne) réduit l’importance des erreurs pour de grandes valeurs réelles, comme le fait deja la MAPE. Elle ne s’exprime pas dans une unité simple, ce qui la rend difficile à interpréter, ce pourquoi nous ne la choisissons pas non plus! 
+
+$\underline{GLM}$
+
+```{r glm, comment=NA}
+fit = glm(cnt~., data=data_train)
+#summary(fit)
+
+lm_prediction_test = predict(fit, newdata=data_test)
+lm_prediction_train = predict(fit, newdata=data_train)
+
+# Plot Predictions
+plot_lm <- ggplot() + 
+  geom_line(data=data, aes(x = timestamp, y = cnt,colour="data")) +
+  geom_line(data=data_train, aes(x = timestamp, y = lm_prediction_train, colour="pred_train")) +
+  geom_line(data=data_test, aes(x = timestamp, y = lm_prediction_test, colour="pred_test")) +
+  scale_color_manual(name = "Series", values = c("navy","salmon", "turquoise3")) +
+  ggtitle("Predictions GLM") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_lm)
+
+# Metrics
+rmse_glm = rmse(data_test$cnt, lm_prediction_test)
+cat("RMSE =", round(rmse_glm,3),"\n")
+mape_glm = mape(data_test$cnt, lm_prediction_test)
+cat("MAPE =", round(mape_glm,3),"\n")
+system.time(predict(fit, newdata=data_test)) 
+```
+Ce modèle est très rapide, mais le résultat n'est pas terrible..
+
+$\underline{SARIMA}$
+
+```{r arima, comment=NA}
+#Convertion Serie Temp
+#données annuel frequency = 1
+#données mensuelles frequency = 12
+#données hebdomadaire frequency =  52
+#données quotidiennes frequency = 365
+
+bikeCount = ts(data$cnt,start = c(2015,1), frequency = 365*24)
+#autoplot(bikeCount)
+
+auto.arima(bikeCount, stepwise=FALSE, approximation=FALSE, seasonal=FALSE, allowdrift=FALSE) 
+```
+
+
+```{r sarima, comment=NA}
+# série temporelle avec plusieurs saisons (mensuelles, trimestrielles)
+msts(data = data$cnt, seasonal.periods = c(7*4, 7*4*4)) %>%
+  mstl() %>%
+  autoplot()
+
+#(mensuels, annuels)
+#msts(data = data$cnt, seasonal.periods = c(7*4, 7*4*24)) %>%
+#  mstl() %>%
+#  autoplot()
+
+bike_msts <- msts(data = data$cnt, seasonal.periods = c(7*4, 7*4*24))
+
+bike_test <- bike_msts %>% tail(2926)
+bike_train <- bike_msts %>% head(length(bike_msts) - (2926))
+
+# créer un modèle SARIMA
+bike_stlm <- stlm(y = bike_train, method = "arima")
+
+# prévision sur le modèle SARIMA (stlm)
+bike_forecast3 <- forecast(object = bike_stlm, h = 2926)
+
+plot_sarima <- bike_msts %>% 
+  autoplot(series = "Valeurs relles", colour="navy") +
+  autolayer(bike_forecast3$mean, series = "Predictions Test") +
+  autolayer(bike_forecast3$fitted, series = "Predictons Train") +
+  labs(title = "Predictions SARIMA") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_sarima)
+
+# Metrics
+rmse_sarima = rmse(bike_test, bike_forecast3$mean)
+cat("RMSE =", round(rmse_sarima,3),"\n")
+mape_sarima = mape(bike_test, bike_forecast3$mean)
+cat("MAPE =", round(mape_sarima,3),"\n")
+system.time(forecast(object = bike_stlm, h = 2926))
+```
+
+Le modèle SARIMA est une extension du modèle ARIMA.  
+Nous otenons une RMSE d'environ 1328 vélos, ce qui est encore moins bon que pour notre modele de regression.
+On constate que le modèle est très bon sur les données d'entraînement et moins bon sur les données de test. On peut donc soupçonner des cas de sur-apprentissage.
+
+$\underline{Arbres~de~décision}$  
+
+```{r Decision Tree, comment=NA}
+set.seed(3)
+
+DT = rpart(cnt~.,data=data_train)
+
+pred_dt_train <- predict(DT,data_train)
+pred_dt_test <- predict(DT,data_test)
+
+rpart.plot(DT)
+#summary(DT)
+#printcp(DT)
+
+#représentation visuelle des résultats de la validation croisée
+plotcp(DT)
+
+# Plot predictions 
+plot_dt <- ggplot() + 
+  geom_line(data=data, aes(x = timestamp, y = cnt,colour="data")) +
+  geom_line(data=data_train, aes(x = timestamp, y = pred_dt_train, colour="pred_train")) +
+  geom_line(data=data_test, aes(x = timestamp, y = pred_dt_test, colour="pred_test")) +
+  scale_color_manual(name = "Series", values = c("navy","salmon", "turquoise3")) +
+  ggtitle("Predictions Decision Tree") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_dt)
+
+# Metrics
+rmse_dt = rmse(data_test$cnt, pred_dt_test)
+cat("RMSE =", round(rmse_dt,3),"\n")
+mape_dt = mape(data_test$cnt, pred_dt_test)
+cat("MAPE =", round(mape_dt,3),"\n") 
+system.time(rpart(cnt~.,data=data_train))
+
+#maxdepth = profondeur max
+#minbucket = min dans noeud terminal
+#minspli = min d'obs qui doivent exister dans un nœud pour qu'une scission soit tentée
+```
+- Sur le premier graphique, nous pouvons visualiser l'arbre obtenu.  
+Trois de nos variables *hour*, *t1* et *weekend* ont été utilisées, et 14 nœuds terminaux ont été générés.  
+Sur notre ensemble d'entrainement, nous voyons que la variable d'heure *hour* est la première variable choisie pour la décision. Le nombre de vélos empruntés attendu, lorsque hour<7 est de 197, et 29% des échantillons tombent dans cette feuille. Lorsque *hour* est inférieure à 7heure, moins de vélos sont utilisés, et lorsque *hour* est >7h et <20h, la température commence à entrer en jeu.  
+
+- Sur le deuxieme graphique, nous pouvons voir l'erreur de validation croisée (relative) pour chaque sous-arbre, du plus petit au plus grand.  
+Dans "les coulisses", rpart() applique automatiquement une validation croisée pour élaguer l'arbre.
+L'axe x en bas correspond a la complexité de l'arbre.  
+L'axe x en haut correspond au nombre de nœuds terminaux, donc la taille de l'arbre.  
+L'axe y a l'erreur de convergence.  
+Un bon choix de cp pour l'élagage est souvent la valeur la plus à gauche pour laquelle la moyenne se trouve sous la ligne horizontale. 
+Nous voyons que l'endroit optimal pour tailler l'arbre correspond a 12 nœuds.
+
+- Notre RMSE pour l'ensemble de test est d'environ 534 vélos!!  
+la MAPE vaut environ 0.79, et le temps d'execution est de 0.118 secondes.  
+
+- Remarque: Les arbres de décision sont des algorithmes où les hyperparamètres sont essentiels en ce qui concerne leur performance. Par exemple, un nombre de profondeurs maximales (maxdepth) trop élevées peut entraîner un surajustement ou une variance élevée, et si ce nombre est trop faible cela peut entraîner a l'inverse un manque d'ajustement ou un biais élevé. Il faut donc faire attention car l'objectif est d'avoir les meilleurs resultats, mais l'arbre pourrait être suradapté.
+
+$\underline{GAM}$
+
+```{r gam, message=F, comment=NA}
+eq  <- cnt ~ s(t1, bs = "cr", k=10) + s(t2, bs = "cr", k=10) + s(Posy, bs = 'cc', k = 10) +
+             s(wind, bs = "cc", k=10)  + s(hum, bs = "cc", k=10) +
+             as.factor(hour) + as.factor(day_of_week) + as.factor(weekend) +
+             as.factor(weather) + as.factor(holiday) 
+
+gam <- mgcv::gam(formula = eq, data = data_train)
+pred_gam_train <- predict(gam,data_train)
+pred_gam_test <- predict(gam, newdata = data_test)
+
+#Plot spleen
+#layout(matrix(1:4, nrow = 2))
+#plot(gam, shade = TRUE)
+
+#summary(gam)
+
+# Plot predictions GAM
+plot_gam <- ggplot() + 
+  geom_line(data=data, aes(x = timestamp, y = cnt,colour="data")) +
+  geom_line(data=data_train, aes(x = timestamp, y = pred_gam_train, colour="pred_train")) +
+  geom_line(data=data_test, aes(x = timestamp, y = pred_gam_test, colour="pred_test")) +
+  scale_color_manual(name = "Series", values = c("navy","salmon", "turquoise3")) +
+  ggtitle("Predictions GAM") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_gam)
+
+# Metrics
+rmse_gam = rmse(data_test$cnt, pred_gam_test)
+cat("RMSE =", round(rmse_gam,3),"\n")
+mape_gam = mape(data_test$cnt,pred_gam_test)
+cat("MAPE =", round(mape_gam,3),"\n")
+system.time(predict(gam, newdata = data_test))
+```
+Plus rapide (seulement 0.014 secondes), mais la RMSE est d'environ 603 vélos, et la MAPE d'environ 1.06 : c'est un peu moins bien que l'arbre !
+
+$\underline{Randomn~forest}$  
+
+```{r rf, message=F, comment=NA}
+set.seed(12)
+
+rf <- ranger(cnt ~., 
+             data = data_train %>% dplyr::select(-timestamp), 
+             num.trees = 200)
+
+prev_rf_train  <- predict(rf, data = data_train)
+prev_rf_test  <- predict(rf, data = data_test)
+
+pred_rf_train <- prev_rf_train$predictions
+pred_rf_test <- prev_rf_test$predictions
+
+# Plot predictions 
+plot_rf <- ggplot() + 
+  geom_line(data=data, aes(x = timestamp, y = cnt,colour="data")) +
+  geom_line(data=data_train, aes(x = timestamp, y = pred_rf_train, colour="pred_train")) +
+  geom_line(data=data_test, aes(x = timestamp, y = pred_rf_test, colour="pred_test")) +
+  scale_color_manual(name = "Series", values = c("navy","salmon", "turquoise3")) +
+  ggtitle("Predictions Randomn Forest") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_rf)
+
+# Metrics
+rmse_rf = rmse(data_test$cnt, pred_rf_test)
+cat("RMSE =", round(rmse_rf,3),"\n")
+mape_rf = mape(data_test$cnt, pred_rf_test)
+cat("MAPE =", round(mape_rf,3),"\n")
+system.time(predict(rf, data = data_test)) 
+```
+Notre RMSE pour l'ensemble de test est d'environ 549 vélos, ce qui est un tout petit peu plus que pour l'abre de décision, mais ils ont la même valeur de MAPE, environ 0.79, et nos forets aleatoires sont plus rapide (0.028 secondes)
+
+$\underline{XGBoost}$  
+
+```{r xgboost, message=F, comment=NA}
+xgb <- xgboost(
+        #on enleve le label et les colonnes non numerique
+        #data = as.matrix(data_train[,-c(1,2,16)]),
+          data = as.matrix(data_train[,-c(1,2,15,16,17)]),
+        #on prend le label = cnt
+          label = as.matrix(data_train[,2]),
+        max.depth = 3, eta = 0.8, nthread = 2, nrounds = 100, 
+        objective = "reg:squarederror", verbose=FALSE)
+
+pred_xgb_train <- predict(xgb, as.matrix(data_train[,-c(1,2,15,16,17)]))
+pred_xgb_test <- predict(xgb, as.matrix(data_test[,-c(1,2,15,16,17)]))
+
+# Plot predictions
+plot_xgb <- ggplot() + 
+  geom_line(data=data, aes(x = timestamp, y = cnt,colour="data")) +
+  geom_line(data=data_train, aes(x = timestamp, y = pred_xgb_train, colour="pred_train")) +
+  geom_line(data=data_test, aes(x = timestamp, y = pred_xgb_test, colour="pred_test")) +
+  scale_color_manual(name = "Series", values = c("navy","salmon", "turquoise3")) +
+  ggtitle("Predictions XGB") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_xgb)
+
+# Metrics
+rmse_xgb = rmse(data_test$cnt, pred_xgb_test)
+cat("RMSE =", round(rmse_xgb,3),"\n")
+mape_xgb = mape(data_test$cnt, pred_xgb_test)
+cat("MAPE =", round(mape_xgb,3),"\n")
+system.time(predict(xgb, as.matrix(data_test[,-c(1,2,15,16,17)])))
+```
+La RMSE vaut environ 373 vélos et la MAPE environ 0.718!!!
+Nous obtenons les meilleurs resultats, l'extreme gradient boosting dépasse tout le monde!
+De plus le temps d'execution est seulement de 0.002 secondes.  
+
+$\underline{Perceptron}(MLP)$
+
+Entrainons le perceptron multi-couches en faisant varient le nombre de neurones, le nombre de couches afin de trouver un modèle qui prédit mieux.
+
+La fonction RELU $f(x)=x^{+}=max(0,x)$ sera notre fonction d'activation.
+On utilisera le package Keras.
+
+- cas d'une couche en entrée et sortie (pas de couche cachée). 
+
+128 neurones à la première couche et 1 à la dernière.
+```{r mlp, comment=NA}
+# On classifie dans nos data_test et data_train la variable cnt du reste des données
+
+X_train = as.matrix(data_train[,-c(1,2,15,16,17)])
+y_train = as.matrix(data_train[,c(2)])
+X_test = as.matrix(data_test[,-c(1,2,15,16,17)])
+y_test = as.matrix(data_test[,c(2)])
+```
+
+```{r mlp1, comment=NA}
+set.seed(4469)
+
+model = keras_model_sequential()
+model %>%
+  layer_dense(units=128, input_shape = dim(X_train)[2],activation ="relu")%>%
+  layer_dropout(0.5)%>% #pour eviter le sur-apprentissage
+  layer_dense(1)
+
+model%>%
+  compile(loss='mse', optimizer='adam')
+
+model%>%
+  fit(X_train,y_train,epochs = 50,batch_size = 128)
+
+pred_mlp_test1 = model%>%predict(X_test)
+pred_mlp_train1 = model%>%predict(X_train)
+
+# Plot predictions
+plot_mlp1 <- ggplot() + 
+  geom_line(data=data, aes(x = timestamp, y = cnt,colour="data")) +
+  geom_line(data=data_train, aes(x = timestamp, y = pred_mlp_train1, colour="pred_train")) +
+  geom_line(data=data_test, aes(x = timestamp, y = pred_mlp_test1, colour="pred_test")) +
+  scale_color_manual(name = "Series", values = c("navy","salmon", "turquoise3")) +
+  ggtitle("Predictions MLP") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_mlp1)
+
+# Metrics
+rmse_mlp1 = rmse(data_test$cnt, pred_mlp_test1)
+cat("RMSE =", round(rmse_mlp1,3),"\n")
+mape_mlp1 = mape(data_test$cnt, pred_mlp_test1)
+cat("MAPE =", round(mape_mlp1,3),"\n")
+system.time(model%>%predict(X_test))
+```
+
+- cas d'une couche en entrée, une couche cachée et une couche de sortie. 
+
+500 neurones à la première et deuxième couche et 1 à la dernière.
+
+```{r mlp2, comment=NA}
+set.seed(4469)
+
+model = keras_model_sequential()
+model %>%
+  layer_dense(units=500, input_shape = dim(X_train)[2],activation ="relu")%>%
+  layer_dropout(0.5)%>% #pour eviter le sur-apprentissage
+  layer_dense(units=500,activation ="relu")%>%
+  layer_dropout(0.3)%>% #pour eviter le sur-apprentissage
+  layer_dense(1)
+
+model%>%
+  compile(loss='mse', optimizer='adam')
+
+model%>%
+  fit(X_train,y_train,epochs = 50,batch_size = 128)
+
+pred_mlp_test2 = model%>%predict(X_test)
+pred_mlp_train2 = model%>%predict(X_train)
+
+# Plot predictions
+plot_mlp2 <- ggplot() + 
+  geom_line(data=data, aes(x = timestamp, y = cnt,colour="data")) +
+  geom_line(data=data_train, aes(x = timestamp, y = pred_mlp_train2, colour="pred_train")) +
+  geom_line(data=data_test, aes(x = timestamp, y = pred_mlp_test2, colour="pred_test")) +
+  scale_color_manual(name = "Series", values = c("navy","salmon", "turquoise3")) +
+  ggtitle("Predictions MLP") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_mlp2)
+
+# Metrics
+rmse_mlp2 = rmse(data_test$cnt, pred_mlp_test2)
+cat("RMSE =", round(rmse_mlp2,3),"\n")
+mape_mlp2 = mape(data_test$cnt, pred_mlp_test2)
+cat("MAPE =", round(mape_mlp2,3),"\n")
+system.time(model%>%predict(X_test))
+```
+
+- cas d'une couche en entrée, deux couches cachées et une couche de sortie. 
+
+600 neurones à la première,deuxième et troisième couche et un  à la dernière.
+
+```{r mlp3,comment=NA}
+set.seed(4469)
+
+model = keras_model_sequential()
+model %>%
+  layer_dense(units=600, input_shape = dim(X_train)[2],activation ="relu")%>%
+  layer_dropout(0.5)%>%
+  layer_dense(units=600,activation ="relu")%>%
+  layer_dropout(0.3)%>%
+  layer_dense(units=600,activation ="relu")%>%
+  layer_dropout(0.2)%>%
+  layer_dense(1)
+
+model%>%
+  compile(loss='mse', optimizer='adam')
+
+model%>%
+  fit(X_train,y_train,epochs = 50,batch_size = 128)
+
+pred_mlp_test3 = model%>%predict(X_test)
+pred_mlp_train3 = model%>%predict(X_train)
+
+# Plot predictions
+plot_mlp3 <- ggplot() + 
+  geom_line(data=data, aes(x = timestamp, y = cnt,colour="data")) +
+  geom_line(data=data_train, aes(x = timestamp, y = pred_mlp_train3, colour="pred_train")) +
+  geom_line(data=data_test, aes(x = timestamp, y = pred_mlp_test3, colour="pred_test")) +
+  scale_color_manual(name = "Series", values = c("navy","salmon", "turquoise3")) +
+  ggtitle("Predictions MLP") + theme(plot.title=element_text(hjust=0.5))
+ggplotly(plot_mlp3)
+
+# Metrics
+rmse_mlp3 = rmse(data_test$cnt, pred_mlp_test3)
+cat("RMSE =", round(rmse_mlp3,3),"\n")
+mape_mlp3 = mape(data_test$cnt, pred_mlp_test3)
+cat("MAPE =", round(mape_mlp3,3),"\n")
+system.time(model%>%predict(X_test))
+
+```
+On constate que le meilleur modèle est le 3 en termes de RMSE et MAPE. Donc plus le modèle aura des couches et de neurones mieux sera les résultats.
+
+## Prediction du futur après le jeu de données
+
+Nous allons maintenant faire un modele prédictif pour essayer de prevoir le jour même, les 24 points (1 point par heure) pour le lendemain, avec nos données allant jusqu’à la veille.
+
+$\underline{Prophet}$  
+
+Prophet se base sur un modèle additif où les tendances non linéaires correspondent aux saisons annuelles, hebdomadaires et quotidiennes, ainsi qu'aux effets des vacances.  
+Le modèle fonctionne mieux avec les séries temporelles qui ont de forts effets saisonniers et les données historiques de plusieurs saisons.  
+Il examine les données antérieures afin de pouvoir analyser le futur.  
+Il utilise un modèle de série temporelle qui peut être décrit par 3 composantes principales du modèle: les tendances, les saisons et les vacances, selon l'équation suivante :  
+
+$y(t) = g(t) + s(t) + h(t) + \epsilon(t)$
+
+$g(t)$ : changements non périodiques des valeurs de la série
+$s(t)$ : changement périodique (saisonnier, hebdomadaire, annuel)
+$h(t)$ : l'effet des jours fériés sur le calendrier, pouvant créer des irrégularités
+$\epsilon(t)$ : changements inhabituels non pris en compte par le modèle
+
+Prophet utilise des régresseurs de température et d’humidité.
+Tout cela nous semble très interessant dans notre cas.  
+Nous allons donc faire des prédictions pour le prochain jour pour chaque heure (ou pour 24 heures).
+
+```{r prophet, message=F, comment=NA}
+set.seed(123)
+
+Datatest <- subset(data, select = c(timestamp, cnt))
+
+names(Datatest)[names(Datatest) == "timestamp"] <- "ds"
+names(Datatest)[names(Datatest) == "cnt"] <- "y"
+Datatest$temp <- data$t1
+Datatest$hum <- data$hum
+
+m <- prophet()
+m <- add_regressor(m, 'temp')
+m <- add_regressor(m, 'hum')
+m <- fit.prophet(m, Datatest) 
+
+future <- make_future_dataframe(m, periods = 365)
+future <- make_future_dataframe(m, periods= 24, freq = 3600, include_history = TRUE)
+#future[17414:17438,]
+#tail(future)
+
+x <- data.frame(Datatest$temp)
+colnames(x) <- 'temp'
+y <- data.frame(runif(24, -1.50, 34))
+colnames(y) <- 'temp'
+future$temp <- rbind(x,y)
+
+x <- data.frame(Datatest$hum)
+colnames(x) <- 'hum'
+y <- data.frame(runif(24, 20.50, 100))
+colnames(y) <- 'hum'
+future$hum <- rbind(x,y)
+
+future <- as.matrix(future)
+colnames(future) <- NULL
+colnames(future) <- c('ds', 'temp', 'hum')
+future <- data.frame(future)
+future$temp <- as.numeric(future$temp)
+future$hum <- as.numeric(future$hum)
+future$ds <- ymd_hms(future$ds)
+
+forecast <- predict(m, future)
+#tail(forecast[c('ds', 'yhat')])
+forecast[17414:17438,c('ds', 'yhat')]
+```
+
+Nous retrouvons la prédiction de nos 24 points pour le lendemain.  
+
+
+```{r prophetplot1}
+plot(m, forecast) +
+  xlab("Date") + ylab("cnt") +
+  ggtitle("Predictions Prophet") + theme(plot.title=element_text(hjust=0.5))
+#prophet_plot_components(m, forecast)
+```
+Sur ce graphique les points en noirs representent les données réelles, et les lignes bleues sont les valeurs prédites.
+Nous le dernier pic bleu correspond a la prediction future de la journée suivante.
+
+```{r prophetplot2, comment=NA}
+pred <- forecast$yhat[1:17414]
+actual <- Datatest[,2]
+plot(actual, pred, col="deepskyblue3")
+abline(lm(pred~actual), col = 'red')
+#summary(lm(pred~actual))
+```
+Nous voyons les performances du modèle grâce au nuage de points, entre la valeur prédite et la valeur réelle.  
+La droite ajustée (en rouge) a une pente positive, ce qui signifie que plus les valeurs "actual" sont grandes, plus les valeur "pred" le sont aussi.  
+Adjusted R-squared: 0,6261  
+[R-squared est un nombre compris entre 0 et 1, et plus il est grand, meilleur sera le modèle résultant]
+Notre résultat n'est pas le plus optimal.
+
+Nous terminons cette partie modelisation par un test ARMA avec Prophet.  
+Nous allons essayer de faire une rediction du futur sur un an avec la moyenne mobile.  
+```{r arma}
+#moyenne mobile (7 jours) + tracé avec prophet
+arma <- data.frame(Datatest$ds, ma(Datatest$y, order = 7))
+
+colnames(arma) <- c("ds", "tsma_order") 
+
+arma_df_for_prophet <- inner_join(Datatest, arma, by = "ds") %>% 
+    filter(tsma_order != is.na(tsma_order))
+
+m_arma <- prophet(arma_df_for_prophet)
+
+future_arma <- make_future_dataframe(m_arma, periods = 365)
+
+forecast_arma <- predict(m_arma, future_arma)
+
+plot(m_arma, forecast_arma)
+```
+
+## Aggregation
+
+À présent agrégions les différents modèles obtenu jusqu’à présent, à savoir l'arbre de décision, le modèle additif généralisé, la forêt aléatoire, le gradient boosting et le perceptron multi-couches.
+On utilisera le package opera pour l'agrégation..
+
+```{r adap/aggreg1, warning=FALSE, comment=NA}
+experts <- cbind(pred_dt_test, pred_gam_test, pred_rf_test, pred_xgb_test,pred_mlp_test3)
+
+colnames(experts)<-c("rpart","gam","rf","xgboost","mlp")
+dim(experts)
+
+agg.online<- mixture(Y = data_test$cnt , experts = experts, model = 'EWA', 
+                     loss.type = "square", loss.gradient = F)
+
+summary(agg.online)
+```
+
+```{r adap/aggreg2, comment=NA}
+poids <- agg.online$weights %>% as.data.frame()
+poids$timestamp <- data_test$timestamp
+
+poids[1:500,]  %>% 
+  gather(-timestamp, key = 'Modele', value = 'Poids') %>%
+  ggplot(aes(x = timestamp, y = Poids, fill = Modele)) +
+  xlab('') + ylab('Aggregation weights') +
+  geom_bar(stat="identity")
+```
+
+On peut toute de suite constater que l'algorithme n'a utilisé que les meilleurs modèles.
+Le gradient boosting domine tous les autres experts. Le perceptron multi-couches apparaît tout au début en éclipsant les autres experts.
+
+Le RMSE et le MAPE du modèle agrégé sont de 373 et 0.715. Soit le meilleur mape que ceux de tous nos modèles précédents et le deuxième meilleur rmse derrière xbgboost de rmse 372.
+
+# Conclusion
+
+Nous remarquons que pour certains modèles, les prévisions du nombre de vélos prennent parfois des valeurs négatives, ce qui n'est pas possible mais comme ce sont des prévisions, cela fait partie de "l'erreur"
+
+```{r ccl}
+ccl <- data.frame(x1=c(`rmse_glm`,`rmse_sarima`,`rmse_dt`,`rmse_gam`,`rmse_rf`,`rmse_xgb`,`rmse_mlp3`,"373","575"),
+                  x2=c(`mape_glm`,`mape_sarima`,`mape_dt`,`mape_gam`,`mape_rf`,`mape_xgb`,`mape_mlp3`,"0.717","0.498"),
+                  x3 = c("0.07","0.02 ","0.118 ","0.007 ","0.029","0.002"," 0.67","NA","NA"))
+
+colnames(ccl)= c("RMSE", "MAPE", "Temps d'execution")
+rownames(ccl)= c("GLM","SARIMA","Arbre de décision", "Modèle Additif Généralisé", "Foret Aléatoire", "eXtreme Gradient Boosting","MLP","EWA","Uniform")
+
+kable(ccl, caption="Resumé des modèles utilisés", booktabs=T) %>%
+  kable_styling(latex_options=c("striped", "hold_position"))
+```
+
+Nous obtenons des MAPE < 10%, ce qui est très bien !
+
+$\underline{Validation~du~modèle~final}$  
+Nous pouvons constater que c'est avec le modèle XGBoost que nous obtenu les meilleurs résultats, et c'est celle qui a également nécessité le moins de temps de calcul, car elle demande moins de paramètres à former que les autres modèles.
+
+Les algorithmes XGBoost et Random Forest souffrent d'une variance élevée, alors on pourrait ajouter plus de données et augmenter l'effet de la régularisation...
+Nous avons entrainé nos modèles sur des données d'un an et 8 mois, et validé sur un ensemble de test de 4 mois. Les vélibs sont moins loués pendant l'hiver que pendant le reste de l'année. Peut-être que l'ajout de plus de données pendant l'hiver aidera à améliorer les performances pendant cette période, ou faire un sur-échantillonnage.
+
+En conclusion générale nous sommes ravis d'avoir pu tester ces modèles sur un jeu concret de donnée.
