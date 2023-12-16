@@ -1,0 +1,439 @@
+---
+title: "Contrôle qualité"
+subtitle: Projet
+author: "Diaby DRAME"
+date: "Janvier 2023"
+lang: "fr"
+output:
+  pdf_document: 
+    df_print: kable
+  html_document:
+always_allow_html: true 
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.align="center", fig.pos="H")
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,echo = TRUE)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)     
+library(grid)       
+library(gridExtra)  
+library(qcc)  #carte de contrôle
+library(EnvStats) #qqplot
+library(tree) #arbre de decision
+library(changepoint) #detection de changement 
+```
+
+# Données
+
+Affichons les premières lignes des $5$ premières colonnes de nos données.
+
+```{r data, echo=TRUE}
+data <- read.csv("Qualite2022-15.csv")
+data = data[,-1]
+head(data)[,1:5]
+```
+```{r echo=TRUE}
+as.data.frame(cbind(ligne=dim(data)[1],colonne=dim(data)[2]),col.names=NULL)
+```
+
+On a $1000$ lignes et  $109$ variables au total.
+
+Regardons les propriétés statistiques des $10$ premières variables.
+
+```{r echo=TRUE}
+summary(data)[,1:10]
+```
+On peut constater que nos données ne sont pas normalisées.
+
+# Test d'adéquation
+
+Traçons l'histogramme des $6$ premières colonnes afin d'essayer de voir si les données suivent une loi en particulier.
+
+```{r histo, echo=TRUE, message=FALSE, warning=FALSE}
+ggp1 <- ggplot(data.frame(data[,1]), aes(x = data[,1])) + 
+    geom_histogram(aes(data[,1], after_stat(density)), binwidth = 1,alpha=0.5,bins =50,
+                   fill="green",color="black") +
+  xlab("Colonne 1") + ylab(" ")
+
+ggp2 <- ggplot(data.frame(data[,2]), aes(x = data[,2])) + 
+    geom_histogram(aes(data[,2], after_stat(density)), binwidth = 3,alpha=0.5,bins =50,
+                   fill="green",color="black") +
+  xlab("Colonne 2") + ylab(" ")
+
+ggp3 <- ggplot(data.frame(data[,3]), aes(x = data[,3])) + 
+    geom_histogram(aes(data[,3], after_stat(density)), binwidth = 1,alpha=0.5,bins =50,
+                   fill="green",color="black") +
+  xlab("Colonne 3") + ylab(" ")
+
+ggp4 <- ggplot(data.frame(data[,4]), aes(x = data[,4])) + 
+    geom_histogram(aes(data[,4], after_stat(density)), binwidth = 0.6,alpha=0.5,bins =30,
+                   fill="green",color="black") +
+  xlab("Colonne 4") + ylab(" ")
+
+ggp5 <- ggplot(data.frame(data[,5]), aes(x = data[,5])) + 
+    geom_histogram(aes(data[,5], after_stat(density)), binwidth = 0.3,alpha=0.5,bins =10,
+                   fill="green",color="black") +
+  xlab("Colonne 5") + ylab(" ")
+
+ggp6 <- ggplot(data.frame(data[,6]), aes(x = data[,6])) + 
+    geom_histogram(aes(data[,6], after_stat(density)), binwidth = 0.3,alpha=0.5,bins =50,
+                   fill="green",color="black") +
+  xlab("Colonne 6") + ylab(" ")
+
+grid.arrange(ggp1, ggp2, ggp3, ggp4, ggp5, ggp6, nrow=2, ncol=3, top=textGrob("Histogrammes
+  des six premieres colonnes",gp=gpar(face="bold", hjust=0.5)) )
+```
+A priori nos données semblent suivre une loi Gamma.
+\newpage
+
+$\bullet$ Pour vérifier cela, traçons des QQ-plot. 
+
+On utilisera le package $EnvStats$ qui permet de tracer les qqplot et estime aussi les paramètres de la loi que les données suivent.
+
+
+```{r tests, echo=TRUE, comment=NA}
+par(mfrow=c(3,2))
+qqPlot(data[,1],dist = "gamma", estimate.params = TRUE, add.line = TRUE,
+       points.col = "blue", line.col = "red",main = "qqplot colonne 1")
+
+qqPlot(data[,2],dist = "gamma", estimate.params = TRUE, add.line = TRUE,
+       points.col = "blue", line.col = "red",main = "qqplot colonne 2")
+
+qqPlot(data[,3],dist = "gamma", estimate.params = TRUE, add.line = TRUE,
+       points.col = "blue", line.col = "red",main = "qqplot colonne 3")
+
+qqPlot(data[,4],dist = "gamma", estimate.params = TRUE, add.line = TRUE,
+       points.col = "blue", line.col = "red",main = "qqplot colonne 4")
+
+qqPlot(data[,5],dist = "gamma", estimate.params = TRUE, add.line = TRUE,
+       points.col = "blue", line.col = "red",main = "qqplot colonne 5")
+
+qqPlot(data[,6],dist = "gamma", estimate.params = TRUE, add.line = TRUE,
+       points.col = "blue", line.col = "red",main = "qqplot colonne 6")
+
+```
+
+
+On peut constater qu'hormis les données de la colonne $4$, la droite diagonale ajuste bien le nuage de points. On peut envisager que nos données suivent une loi gamma.
+\newpage
+$\bullet$ Confirmons cela par un test d’adéquation de Kolmogorov-Smirnov sous un risque de $5\%$.
+
+On utilisera la méthode des moments pour estimer les paramètres. En effet, si $X \sim \Gamma (a,b)$, on a $\mathbb{E}[X] = \frac{a}{b}$ et $var(X) = \frac{a}{b}$
+
+```{r echo=TRUE}
+c1 = data[,1] 
+ks.test(c1,"pgamma",mean(c1)**2/var(c1),mean(c1)/var(c1))
+```
+```{r echo=TRUE}
+c2 = data[,2] 
+ks.test(c2,"pgamma",mean(c2)**2/var(c2),mean(c2)/var(c2))
+```
+```{r echo=TRUE}
+c3 = data[,3] 
+ks.test(c3,"pgamma",mean(c3)**2/var(c3),mean(c3)/var(c3))
+```
+
+```{r echo=TRUE}
+c4 = data[,4] 
+ks.test(c4,"pgamma",mean(c4)**2/var(c4),mean(c4)/var(c4))
+```
+
+```{r echo=TRUE}
+c5 = data[,5] 
+ks.test(c5,"pgamma",mean(c5)**2/var(c5),mean(c5)/var(c5))
+```
+
+```{r echo=TRUE}
+c6 = data[,6] 
+ks.test(c6,"pgamma",mean(c6)**2/var(c6),mean(c6)/var(c6))
+```
+
+Nous pouvons conclure que :
+
+$\bullet$ les données des colonnes $1$, $2$, $3$ et $6$ suivent bien des lois Gamma car les pvalues obtenues sont supérieures au seuil de $5\%$
+
+$\bullet$ pour les données de la colonne $5$, on  a une pvalue de $0.03498$. Ainsi, les données suivraient une loi gamma sous un seuil de $3\%$, mais cette hypothèse est rejeté sous un seuil de $5\%$.
+
+$\bullet$ Au vu de la valeur de la pvalue, les données de la colonne $4$ ne semblent pas suivre une loi gamma. Ce qui n’est pas surprenant au vu de son qqplot.
+
+\newpage
+
+# Cartes de contrôle sur la moyenne, la variance et l'étendu
+
+On va créer des cartes de contrôles pour les colonnes $7$ à $106$.
+
+Pour ce faire, on a utilisera le package $qcc$.
+
+$\bullet$  Pour la moyenne:
+
+```{r carte_moyenne, echo=TRUE, fig.height=4, fig.width=10}
+carte_moyenne = qcc(data[,7:106], type = "xbar", title = "Carte de contrôle sur la moyenne")
+```
+
+Aucun point n'est hors des intervalles de contrôle. 
+
+Nous sommes sous contrôle.  
+
+$\bullet$  Pour la variance:
+
+```{r carte_variance, echo=TRUE, fig.height=4, fig.width=10}
+carte_variance = qcc(data[,7:106], type = "S", title = "Carte de contrôle sur la variance")
+```
+
+Plusieurs points sont hors des intervalles de contrôle.
+
+Le processus n'est pas sous contrôle.
+
+\newpage
+
+$\bullet$  Pour l'etendue:
+
+```{r carte_etendu, echo=TRUE, fig.height=4, fig.width=10}
+c1 = qcc(data[,7:31], type = "R", title = "Carte de contrôle sur l'étendue")
+c2 = qcc(data[,32:56], type = "R", title = "Carte de contrôle sur l'étendue")
+c3 = qcc(data[,57:81], type = "R", title = "Carte de contrôle sur l'étendue")
+c4 = qcc(data[,82:106], type = "R", title = "Carte de contrôle sur l'étendue")
+```
+
+De même que sur la carte de la variance, de nombreux points sont hors contrôle.
+
+Nous ne sommes donc pas sous contrôle.
+
+\newpage 
+
+# Cartes CUSUM et EWMA
+
+Pour les colonnes $107$ et $108$, on va essayer de détecter un changement par rapport à une moyenne égale à $2$. 
+
+$\bullet$  Colonne $107$:
+
+```{r colonne107, echo=TRUE, fig.height=4, fig.width=10}
+cusum = cusum(data[,107], center=2, title="Carte CUSUM")
+ewma = ewma(data[,107], center=2, title="Carte EWMA")
+```
+
+On peut voir que sur les deux cartes, les $498$ dernières observations sont hors contrôle..
+
+Le changement a lieu à peu près à mis-parcours.
+
+\newpage
+
+$\bullet$  Colonne $108$:
+
+```{r colonne108, echo=TRUE, fig.height=4, fig.width=10}
+cusum = cusum(data[,108], center=2, title="Carte CUSUM")
+ewma = ewma(data[,108], center=2, title="Carte EWMA")
+```
+
+On peut voir que sur la carte CUSUM, $719$ points sont hors contrôle tandis que pour la carte EWMA, c'est $405$ points qui sont hors contrôle.  
+
+La carte EWMA est donc préférable à la carte CUSUM.
+
+\newpage 
+
+#  Instant de rupture
+
+$\bullet$ Essayons de détecter l'instant de rupture dans les données de la colonne $109$, s'il a lieu.
+
+En s'aidant de la fonction $cpt.mean$ du package $chamgepoint$, regardons s'il y a un changement dans la moyenne.
+
+```{r rupture, echo=TRUE, fig.height=4, fig.width=10}
+
+m = cpt.mean(data[,109])
+r = cpts(m)
+plot(m,ylab=NA, xlab=NA)
+abline(v = r, lwd = 3, col="turquoise")
+
+```
+Le changement a eu lieu à l'instant de rupture $457$.
+
+Faisons un arbre de décision pour voir si nous tombons sur le même instant de rupture.
+
+
+
+```{r echo=TRUE, fig.height=4, fig.width=10}
+
+d = data.frame(x=1:1000,y=data[,109])
+plot(tree(y~.,d))
+text(tree(y~.,d))
+```
+
+On retrouve correctement le même instant de rupture.
+
+Regardons la loi des données avant et après l'instant de rupture.
+
+```{r echo=TRUE, fig.height=4, fig.width=10}
+ggp1 <- ggplot(data.frame(data[1:456,109]), aes(x = data[1:456,109])) + 
+    geom_histogram(aes(data[1:456,109], after_stat(density)), binwidth = 0.5,alpha=0.5,bins =50,
+                   fill="green",color="black") +
+  xlab("") + ylab(" ")
+
+ggp2 <- ggplot(data.frame(data[457:1000,109]), aes(x = data[457:1000,109])) + 
+    geom_histogram(aes(data[457:1000,109], after_stat(density)), binwidth = 1,alpha=0.5,bins =50,
+                   fill="green",color="black") +
+  xlab("") + ylab(" ")
+
+grid.arrange(ggp1, ggp2, nrow=1, ncol=2, top=textGrob("Histogrammes
+                                                      
+avant/aprèS rupture",gp=gpar(face="bold",hjust=0.5)) )
+```
+
+Cela semble être des lois gamma. 
+
+Traçons les qqplot et faisons le test de  Kolmogorov-Smirnov.
+
+```{r echo=TRUE, fig.height=4, fig.width=10}
+  qqPlot(data[1:456,109],dist = "gamma", estimate.params = TRUE, add.line = TRUE,
+         points.col = "blue", line.col = "red",main = "données avant rupture")
+```
+
+
+```{r echo=TRUE, fig.height=4, fig.width=10}
+  qqPlot(data[457:1000,109],dist = "gamma", estimate.params = TRUE,add.line = TRUE,
+         points.col = "blue", line.col = "red",main = "données après rupture")
+```
+
+```{r echo=TRUE}
+av = data[1:456,109]
+ks.test(av,"pgamma",mean(av)**2/var(av),mean(av)/var(av))
+```
+
+
+```{r echo=TRUE}
+ap = data[457:1000,109]
+ks.test(ap,"pgamma",mean(ap)**2/var(ap),mean(ap)/var(ap))
+```
+
+On peut donc en déduire que, nos données d'avant et d'après rupture suivent des lois gamma.
+
+$\bullet$ À présent, donnons la borne supérieur du délai à la détection et le taux de fausse alarme.
+
+Pour calculer l'instant de détection, nous utilisons la formule du cours suivante:
+\[T_c = inf\lbrace t \geq  : \smash{\displaystyle\max_{1 \leq k < t}} S_k^t \rbrace\]
+\[S_k^t = \sum_{i=k}^{t} \frac{P_{\theta_1}(X_i)}{P_{\theta_0}(X_i)}\]
+
+On fixe le seuil $h$ à $5$.
+
+On va faire $456$ réalistions de nos données avant rupture et $1000-457 = 543$ réalisations de nos données après rupture.
+
+Il est à noter qu'on peut estimer les paramètres de nos données via la méthode des moments.
+
+On répétera  $200$ fois l'étape précédente.
+
+
+
+```{r echo=TRUE, fig.height=4, fig.width=10}
+set.seed(10)
+
+N_simulation <- function(N,n,rupture){
+  
+  r = matrix(0,nrow = 999, ncol = N)
+  for (i in 1:N){
+   r[,i] = c(rgamma(rupture-1,mean(av)**2/var(av),mean(av)/var(av)),
+             rgamma(n-rupture,mean(ap)**2/var(ap),mean(ap)/var(ap)))
+  }
+  
+  return (r)
+}
+N = 200
+rep = N_simulation(N,1000,457)
+hist(rep,ylab=NA, xlab=NA,main = NA)
+```
+
+
+
+
+```{r echo=TRUE}
+S_kt = function(X,k,t){
+  
+  m0 = mean(av)
+  v0 = var(av)
+  m1 = mean(ap)
+  v1 = var(ap)
+  
+  s = 0
+  for(i in k:t){
+    s = s + log(dgamma(X[i],m1**2/v1,m1/v1)/dgamma(X[i],m0**2/v0,m0/v0))
+  }
+  
+  return (s)
+}
+ 
+
+detection <- function(X,t=1){
+  
+  ind = which.max(sapply(1:t,function(k) S_kt(X,k,t)))
+  Max =  S_kt(X,ind,t)
+  
+  while(Max < 5){
+    
+    t = t+1
+    ind = which.max(sapply(1:t,function(k) S_kt(X,k,t)))
+    
+    Max =  S_kt(X,ind,t)
+
+  }
+  
+  return (t)
+}
+
+library(parallel)
+library(foreach)
+library(doParallel)
+
+f <- function(N,rupture,X){
+  
+  a = 0
+  m = NULL
+  
+  Ncpus <- parallel::detectCores() - 1
+  cl <- parallel::makeCluster(Ncpus)
+  doParallel::registerDoParallel(cl)
+  
+  foreach::foreach(i=1:N, .packages=c("e1071")) %do%  {
+    
+    x = X[,i]
+    d = detection(x)
+    print(d)
+    m[i] = abs(d-rupture)
+    
+    if (d <= rupture){
+      
+        a = a+1
+    }
+    
+  }
+   
+   parallel::stopCluster(cl) 
+    
+  
+  return (list(alarme = a/N, sup = max(m)))
+}
+
+```
+
+
+
+```{r echo=TRUE}
+rupture=457
+
+f = f(N,rupture,rep)
+```
+
+La borne supérieur du délai à la détection :
+
+```{r echo=TRUE}
+f$sup
+```
+
+Le taux de fausse :
+
+```{r echo=TRUE}
+f$alarme
+```
+
